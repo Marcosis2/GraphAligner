@@ -15,9 +15,16 @@
 #include "GraphAlignerCommon.h"
 #include "ArrayPriorityQueue.h"
 
-#ifndef NDEBUG
-thread_local int debugLastRowMinScore;
+
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+#include <immintrin.h>
 #endif
+#include <cstdint>
+
+#ifndef NDEBUG
+inline thread_local int debugLastRowMinScore = 0;
+#endif
+
 
 template <typename LengthType, typename ScoreType, typename Word>
 class GraphAlignerBitvectorCommon
@@ -243,22 +250,21 @@ public:
 #endif
 	static inline std::tuple<WordSlice, Word, Word> getNextSlice(Word Eq, WordSlice slice, Word hinP, Word hinN)
 	{
-		//http://www.gersteinlab.org/courses/452/09-spring/pdf/Myers.pdf
-		//pages 405 and 408
 
-		Word Xv = Eq | slice.VN; //line 7
-		Eq |= hinN; //between lines 7-8
-		Word Xh = (((Eq & slice.VP) + slice.VP) ^ slice.VP) | Eq; //line 8
-		Word Ph = slice.VN | ~(Xh | slice.VP); //line 9
-		Word Mh = slice.VP & Xh; //line 10
-		Word tempMh = (Mh << 1) | hinN; //line 16 + between lines 16-17
-		hinN = Mh >> (WordConfiguration<Word>::WordSize-1); //line 11
-		Word tempPh = (Ph << 1) | hinP; //line 15 + between lines 16-17
-		slice.VP = tempMh | ~(Xv | tempPh); //line 17
-		hinP = Ph >> (WordConfiguration<Word>::WordSize-1); //line 13
-		slice.VN = tempPh & Xv; //line 18
-		slice.scoreEnd -= hinN; //line 12
-		slice.scoreEnd += hinP; //line 14
+
+		Word Xv = Eq | slice.VN;
+		Eq |= hinN;
+		Word Xh = (((Eq & slice.VP) + slice.VP) ^ slice.VP) | Eq;
+		Word Ph = slice.VN | ~(Xh | slice.VP);
+		Word Mh = slice.VP & Xh;
+		Word tempMh = (Mh << 1) | hinN;
+		hinN = Mh >> (WordConfiguration<Word>::WordSize-1);
+		Word tempPh = (Ph << 1) | hinP;
+		slice.VP = tempMh | ~(Xv | tempPh);
+		hinP = Ph >> (WordConfiguration<Word>::WordSize-1);
+		slice.VN = tempPh & Xv;
+		slice.scoreEnd -= hinN;
+		slice.scoreEnd += hinP;
 
 		return std::make_tuple(slice, Ph, Mh);
 	}
@@ -510,6 +516,8 @@ public:
 			for (size_t i = 0; i < nodeSlices.size(); i++)
 			{
 				auto maxScore = nodeSlices[i].maxXScoreFirstSlices(slice.slices[currentSlice].j, params.XscoreErrorCost, std::min((size_t)WordConfiguration<Word>::WordSize, (size_t)(sequence.size() - slice.slices[currentSlice].j)));
+
+
 				assert(maxScore <= score);
 				if (maxScore == score)
 				{
@@ -903,7 +911,9 @@ public:
 		assert((verticalOffset % WordConfiguration<Word>::WordSize) == 0);
 		size_t hori = pos.nodeOffset;
 		size_t vert = pos.seqPos - verticalOffset;
+		assert(vert >= 0);
 		assert(vert < WordConfiguration<Word>::WordSize);
+		assert(hori >= 0);
 		assert(hori < nodeSlices.size());
 		std::vector<MatrixPosition> result;
 		while (hori > 0 && vert > 0)
@@ -958,8 +968,8 @@ public:
 		ScoreType scoreHere = startSlice.getValue(offset);
 		if (scoresNotValid || scoreHere > quitScore)
 		{
-			//this location is out of the band so the usual horizontal and vertical score limits don't apply
-			//just pick the smallest scoring in-neighbor
+
+
 			assert(offset > 0);
 			ScoreType smallestFound = startSlice.getValue(offset-1);
 			MatrixPosition smallestPos { node, 0, pos.seqPos-1 };
@@ -1041,8 +1051,8 @@ public:
 			{
 				return std::make_pair(std::make_pair(pos, false), std::make_pair(pos, false));
 			}
-			//this location is out of the band so the usual horizontal and vertical score limits don't apply
-			//just pick the smallest scoring in-neighbor
+
+
 			if (scoreDiagonal <= scoreUp)
 			{
 				return std::make_pair(std::make_pair(pos, false), std::make_pair(MatrixPosition{pos.node, pos.nodeOffset - 1, pos.seqPos-1}, false));
@@ -1069,8 +1079,8 @@ public:
 			{
 				return std::make_pair(MatrixPosition { node, 0, j }, false);
 			}
-			//this location is out of the band so the usual horizontal and vertical score limits don't apply
-			//just pick the smallest scoring in-neighbor
+
+
 			ScoreType smallestFound = scoreHere+1;
 			MatrixPosition smallestPos { std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max() };
 			bool nodeChange = false;
@@ -1119,7 +1129,7 @@ public:
 				ScoreType cornerScore = previous.node(neighbor).endSlice.scoreEnd;
 				if (previousScoresNotValid || cornerScore > previousQuitScore)
 				{
-					//scores not valid, pick best
+
 					if (cornerScore < bestInvalidBacktraceScore)
 					{
 						bestInvalidBacktraceScore = cornerScore;
@@ -1170,7 +1180,7 @@ public:
 		{
 			return std::make_pair(MatrixPosition { node, 0, j }, false);
 		}
-		//scores not valid, pick best
+
 		if (bestInvalidBacktraceScore < scoreHere+1)
 		{
 			assert(bestInvalidBacktrace.node != (size_t)-1 || bestInvalidBacktrace.nodeOffset != (size_t)-1 || bestInvalidBacktrace.seqPos != (size_t)-1);
@@ -1205,7 +1215,7 @@ public:
 	static std::vector<WordSlice> recalcNodeWordslice(const Params& params, LengthType node, const typename NodeSlice<LengthType, ScoreType, Word, false>::NodeSliceMapItem& slice, const EqVector& EqV, const typename NodeSlice<LengthType, ScoreType, Word, false>::NodeSliceMapItem& previousSlice, bool sliceConsistency, const WordSlice extraSlice, ScoreType seqOffset)
 	{
 		size_t nodeLength = params.graph.NodeLength(node);
-		std::vector<EdgeWithPriority> incoming; // also fake!
+		std::vector<EdgeWithPriority> incoming;
 		incoming.emplace_back(node, 0, slice.startSlice, true);
 		std::vector<WordSlice> result;
 		result.reserve(nodeLength);
@@ -1228,6 +1238,160 @@ public:
 		return result;
 	}
 
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    static inline void computeVPVNScores8bit(uint64_t VP, uint64_t VN, int8_t baseScore, int8_t* outScores) {
+
+
+		__m512i v_p = _mm512_maskz_set1_epi8((__mmask64)VP, 1);
+
+		__m512i v_n = _mm512_maskz_set1_epi8((__mmask64)VN, -1);
+
+
+		__m512i v = _mm512_add_epi8(v_p, v_n);
+
+
+		v = _mm512_add_epi8(v, _mm512_bslli_epi128(v, 1));
+		v = _mm512_add_epi8(v, _mm512_bslli_epi128(v, 2));
+		v = _mm512_add_epi8(v, _mm512_bslli_epi128(v, 4));
+		v = _mm512_add_epi8(v, _mm512_bslli_epi128(v, 8));
+
+
+		int8_t temp[64] __attribute__((aligned(64)));
+		_mm512_store_si512(temp, v);
+
+
+		int8_t sum0 = temp[15];
+		int8_t sum1 = sum0 + temp[31];
+		int8_t sum2 = sum1 + temp[47];
+
+
+		__m128i offset0 = _mm_set1_epi8(baseScore);
+		__m128i offset1 = _mm_set1_epi8(baseScore + sum0);
+		__m128i offset2 = _mm_set1_epi8(baseScore + sum1);
+		__m128i offset3 = _mm_set1_epi8(baseScore + sum2);
+
+
+		__m512i v_offset = _mm512_castsi128_si512(offset0);
+		v_offset = _mm512_inserti32x4(v_offset, offset1, 1);
+		v_offset = _mm512_inserti32x4(v_offset, offset2, 2);
+		v_offset = _mm512_inserti32x4(v_offset, offset3, 3);
+
+
+		__m512i v_final = _mm512_add_epi8(v, v_offset);
+
+		_mm512_storeu_si512(outScores, v_final);
+	}
+
+
+	static inline void computeNextColumnAVX5128bit(
+		const int8_t* currentScores, int8_t* outScores,
+		uint64_t HP, uint64_t HN,
+		int carry_in_HP, int carry_in_HN)
+	{
+
+		__m512i v_scores = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(currentScores));
+
+
+		__m512i v_HP = _mm512_maskz_set1_epi8(HP, 1);
+		__m512i v_HN = _mm512_maskz_set1_epi8(HN, 1);
+
+
+		__m512i v_delta = _mm512_sub_epi8(v_HP, v_HN);
+
+
+		int8_t base_shift = carry_in_HP - carry_in_HN;
+		__m512i v_base_shift = _mm512_set1_epi8(base_shift);
+
+
+		__m512i v_next = _mm512_add_epi8(v_scores, v_delta);
+		v_next = _mm512_sub_epi8(v_next, v_base_shift);
+
+		_mm512_storeu_si512(reinterpret_cast<__m512i*>(outScores), v_next);
+	}
+
+
+alignas(64) static constexpr int32_t PRECOMPUTED_CELLS_X_100_32BIT[64] = {
+    100,  200,  300,  400,  500,  600,  700,  800,  900, 1000, 1100, 1200, 1300, 1400, 1500, 1600,
+    1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2900, 3000, 3100, 3200,
+    3300, 3400, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200, 4300, 4400, 4500, 4600, 4700, 4800,
+    4900, 5000, 5100, 5200, 5300, 5400, 5500, 5600, 5700, 5800, 5900, 6000, 6100, 6200, 6300, 6400
+};
+
+
+struct RunningMaxAVX512_32bit {
+    __m512i max0, max1, max2, max3;
+
+    RunningMaxAVX512_32bit() {
+        __m512i min_val = _mm512_set1_epi32(-2147483647);
+        max0 = min_val; max1 = min_val; max2 = min_val; max3 = min_val;
+    }
+};
+
+
+__attribute__((target("avx512f,avx512bw")))
+static inline void updateRunningMax32bit(
+    const int8_t* scores8bit, RunningMaxAVX512_32bit& runningMax,
+    __m512i v_errorCost, int32_t zeroScore,
+    __m512i v_cells0, __m512i v_cells1, __m512i v_cells2, __m512i v_cells3, uint64_t validMask)
+{
+    __m512i v_scores8 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(scores8bit));
+    __m512i v_zero = _mm512_set1_epi32(zeroScore);
+
+
+    __m128i v_scores8_0 = _mm512_extracti32x4_epi32(v_scores8, 0);
+    __m512i v_scoreHere0 = _mm512_cvtepi8_epi32(v_scores8_0);
+    __m512i v_penalty0 = _mm512_mullo_epi32(v_scoreHere0, v_errorCost);
+    __m512i v_result0 = _mm512_add_epi32(_mm512_sub_epi32(v_cells0, v_penalty0), v_zero);
+    __mmask16 mask0 = validMask & 0xFFFF;
+    runningMax.max0 = _mm512_mask_max_epi32(runningMax.max0, mask0, runningMax.max0, v_result0);
+
+
+    __m128i v_scores8_1 = _mm512_extracti32x4_epi32(v_scores8, 1);
+    __m512i v_scoreHere1 = _mm512_cvtepi8_epi32(v_scores8_1);
+    __m512i v_penalty1 = _mm512_mullo_epi32(v_scoreHere1, v_errorCost);
+    __m512i v_result1 = _mm512_add_epi32(_mm512_sub_epi32(v_cells1, v_penalty1), v_zero);
+    __mmask16 mask1 = (validMask >> 16) & 0xFFFF;
+    runningMax.max1 = _mm512_mask_max_epi32(runningMax.max1, mask1, runningMax.max1, v_result1);
+
+
+    __m128i v_scores8_2 = _mm512_extracti32x4_epi32(v_scores8, 2);
+    __m512i v_scoreHere2 = _mm512_cvtepi8_epi32(v_scores8_2);
+    __m512i v_penalty2 = _mm512_mullo_epi32(v_scoreHere2, v_errorCost);
+    __m512i v_result2 = _mm512_add_epi32(_mm512_sub_epi32(v_cells2, v_penalty2), v_zero);
+    __mmask16 mask2 = (validMask >> 32) & 0xFFFF;
+    runningMax.max2 = _mm512_mask_max_epi32(runningMax.max2, mask2, runningMax.max2, v_result2);
+
+
+    __m128i v_scores8_3 = _mm512_extracti32x4_epi32(v_scores8, 3);
+    __m512i v_scoreHere3 = _mm512_cvtepi8_epi32(v_scores8_3);
+    __m512i v_penalty3 = _mm512_mullo_epi32(v_scoreHere3, v_errorCost);
+    __m512i v_result3 = _mm512_add_epi32(_mm512_sub_epi32(v_cells3, v_penalty3), v_zero);
+    __mmask16 mask3 = (validMask >> 48) & 0xFFFF;
+    runningMax.max3 = _mm512_mask_max_epi32(runningMax.max3, mask3, runningMax.max3, v_result3);
+}
+
+
+static inline int32_t reduceRunningMax32bit(const RunningMaxAVX512_32bit& runningMax) {
+    __m512i v_max_01 = _mm512_max_epi32(runningMax.max0, runningMax.max1);
+    __m512i v_max_23 = _mm512_max_epi32(runningMax.max2, runningMax.max3);
+    __m512i v_max_final = _mm512_max_epi32(v_max_01, v_max_23);
+    return _mm512_reduce_max_epi32(v_max_final);
+}
+
+	static inline Word maxXScoreCandidateMask(Word VP, Word extraMask)
+	{
+		Word priorityCausedMinima = ~VP;
+		Word possibleLocalMinima = (VP & (priorityCausedMinima - VP));
+		possibleLocalMinima >>= 1;
+		possibleLocalMinima |= WordConfiguration<Word>::LastBit & (priorityCausedMinima | ~(priorityCausedMinima - VP)) & ~VP;
+		possibleLocalMinima &= extraMask;
+		possibleLocalMinima |= 1;
+		possibleLocalMinima |= (Word)1 << (Word)(WordConfiguration<Word>::WordSize-1);
+		return possibleLocalMinima;
+	}
+#endif
+
+
 	template <typename NodeChunkType>
 #ifdef NDEBUG
 	__attribute__((always_inline))
@@ -1236,6 +1400,7 @@ public:
 	{
 		return calculateNodeInner<true>(params, i, slice, EqV, previousSlice, incoming, [&previousBand](size_t pos) { return previousBand[pos]; }, nodeChunks, extraSlice, [](const WordSlice& slice){}, seqOffset);
 	}
+
 
 	template <bool AllowEarlyLeave, typename NodeChunkType, typename WordsliceCallback, typename ExistenceCheckFunction>
 #ifdef NDEBUG
@@ -1313,7 +1478,7 @@ public:
 				newWs.VP &= WordConfiguration<Word>::AllOnes ^ 1;
 				newWs.VN |= 1;
 			}
-			// assert(newWs.getScoreBeforeStart() >= debugLastRowMinScore || newWs.getScoreBeforeStart() >= extraSlice.getScoreBeforeStart());
+
 			if (!hasWs)
 			{
 				ws = newWs;
@@ -1335,7 +1500,7 @@ public:
 		result.minScore = ws.scoreEnd;
 		result.minScoreNode = i;
 		result.minScoreNodeOffset = 0;
-		
+
 		result.maxExactEndposScore = ws.maxXScore(seqOffset, params.XscoreErrorCost);
 		result.maxExactEndposNode = i;
 
@@ -1346,21 +1511,21 @@ public:
 				if (ws.scoreEnd > slice.startSlice.scoreEnd)
 				{
 #ifdef EXTRACORRECTNESSASSERTIONS
-					auto debugTest = ws.mergeWith(slice.startSlice);
-					assert(debugTest.VP == slice.startSlice.VP);
-					assert(debugTest.VN == slice.startSlice.VN);
-					assert(debugTest.scoreEnd == slice.startSlice.scoreEnd);
+					auto mergedSliceCheck = ws.mergeWith(slice.startSlice);
+					assert(mergedSliceCheck.VP == slice.startSlice.VP);
+					assert(mergedSliceCheck.VN == slice.startSlice.VN);
+					assert(mergedSliceCheck.scoreEnd == slice.startSlice.scoreEnd);
 #endif
 					if constexpr (AllowEarlyLeave) return result;
 				}
 				else if (ws.scoreEnd < slice.startSlice.scoreEnd)
 				{
 #ifdef EXTRACORRECTNESSASSERTIONS
-					auto debugTest = ws.mergeWith(slice.startSlice);
-					// todo figure out why breaks
-					assert(debugTest.VP == ws.VP);
-					assert(debugTest.VN == ws.VN);
-					assert(debugTest.scoreEnd == ws.scoreEnd);
+					auto mergedSliceCheck = ws.mergeWith(slice.startSlice);
+
+					assert(mergedSliceCheck.VP == ws.VP);
+					assert(mergedSliceCheck.VN == ws.VN);
+					assert(mergedSliceCheck.scoreEnd == ws.scoreEnd);
 #endif
 				}
 				else
@@ -1370,20 +1535,20 @@ public:
 					if (newBigger > oldBigger)
 					{
 #ifdef EXTRACORRECTNESSASSERTIONS
-						auto debugTest = ws.mergeWith(slice.startSlice);
-						// todo figure out why breaks
-						assert(debugTest.VP == ws.VP);
-						assert(debugTest.VN == ws.VN);
-						assert(debugTest.scoreEnd == ws.scoreEnd);
+						auto mergedSliceCheck = ws.mergeWith(slice.startSlice);
+
+						assert(mergedSliceCheck.VP == ws.VP);
+						assert(mergedSliceCheck.VN == ws.VN);
+						assert(mergedSliceCheck.scoreEnd == ws.scoreEnd);
 #endif
 					}
 					else if (oldBigger > newBigger)
 					{
 #ifdef EXTRACORRECTNESSASSERTIONS
-						auto debugTest = ws.mergeWith(slice.startSlice);
-						assert(debugTest.VP == slice.startSlice.VP);
-						assert(debugTest.VN == slice.startSlice.VN);
-						assert(debugTest.scoreEnd == slice.startSlice.scoreEnd);
+						auto mergedSliceCheck = ws.mergeWith(slice.startSlice);
+						assert(mergedSliceCheck.VP == slice.startSlice.VP);
+						assert(mergedSliceCheck.VN == slice.startSlice.VN);
+						assert(mergedSliceCheck.scoreEnd == slice.startSlice.scoreEnd);
 #endif
 						if constexpr (AllowEarlyLeave) return result;
 					}
@@ -1542,6 +1707,104 @@ public:
 		size_t smallChunk = 0;
 		size_t offset = 1;
 		pos = smallChunk * (WordConfiguration<Word>::WordSize / 2) + offset;
+
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+        RunningMaxAVX512_32bit accumulatedVectorMax;
+        alignas(64) int8_t tempScores[64];
+        computeVPVNScores8bit(ws.VP, ws.VN, 0, tempScores);
+
+
+        __m512i v_errorCost_32 = _mm512_set1_epi32(params.XscoreErrorCost);
+        __m512i v_cells0 = _mm512_load_si512(reinterpret_cast<const __m512i*>(&PRECOMPUTED_CELLS_X_100_32BIT[0]));
+        __m512i v_cells1 = _mm512_load_si512(reinterpret_cast<const __m512i*>(&PRECOMPUTED_CELLS_X_100_32BIT[16]));
+        __m512i v_cells2 = _mm512_load_si512(reinterpret_cast<const __m512i*>(&PRECOMPUTED_CELLS_X_100_32BIT[32]));
+        __m512i v_cells3 = _mm512_load_si512(reinterpret_cast<const __m512i*>(&PRECOMPUTED_CELLS_X_100_32BIT[48]));
+
+			for (; smallChunk < params.graph.CHUNKS_IN_NODE; smallChunk++)
+		{
+			size_t bigChunk = smallChunk / 2;
+			size_t bigChunkOffset = (smallChunk % 2) * (WordConfiguration<Word>::WordSize / 2);
+			Word HP = fixedHP[bigChunk] >> bigChunkOffset;
+			Word HN = fixedHN[bigChunk] >> bigChunkOffset;
+			auto charChunk = nodeChunks[smallChunk];
+			HP >>= offset;
+			HN >>= offset;
+			charChunk >>= offset * 2;
+			forceMask >>= offset;
+			for (; offset < WordConfiguration<Word>::WordSize / 2 && pos < nodeLength; offset++)
+			{
+				Eq = EqV.getEqI(charChunk & 3);
+				Eq &= forceEq;
+				Word newHP;
+				Word newHN;
+				int carry_in_HP = HP & 1;
+				int carry_in_HN = HN & 1;
+				std::tie(newWs, newHP, newHN) = getNextSlice(Eq, ws, HP & 1, HN & 1);
+				bool scoresNeedRebuild = false;
+				if (forceMask & 1)
+				{
+					newWs.VP &= WordConfiguration<Word>::AllOnes ^ 1;
+					newWs.VN |= 1;
+					scoresNeedRebuild = true;
+				}
+				if (extraSlice.scoreEnd != std::numeric_limits<ScoreType>::max())
+				{
+					newWs = newWs.mergeWith(extraSlice);
+					assert(newWs.scoreEnd >= ws.scoreEnd-1);
+					assert(newWs.scoreEnd <= ws.scoreEnd+1);
+					hinP = newWs.scoreEnd == ws.scoreEnd+1 ? 1 : 0;
+					hinN = newWs.scoreEnd == ws.scoreEnd-1 ? 1 : 0;
+					scoresNeedRebuild = true;
+				}
+				else
+				{
+					hinP = newHP >> (WordConfiguration<Word>::WordSize-1);
+					hinN = newHN >> (WordConfiguration<Word>::WordSize-1);
+				}
+#ifdef EXTRACORRECTNESSASSERTIONS
+				assertSliceCorrectness(ws, newWs, Eq, (HP & 1) - (HN & 1), extraSlice);
+				if (hinP == 1) assert(newWs.scoreEnd == ws.scoreEnd+1);
+				if (hinN == 1) assert(newWs.scoreEnd == ws.scoreEnd-1);
+#endif
+
+				if (scoresNeedRebuild) {
+
+					computeVPVNScores8bit(newWs.VP, newWs.VN, 0, tempScores);
+				} else {
+					computeNextColumnAVX5128bit(tempScores, tempScores, newHP, newHN, carry_in_HP, carry_in_HN);
+				}
+
+
+				ws = newWs;
+
+				int32_t sbs = (int32_t)ws.getScoreBeforeStart();
+                int32_t zeroScoreN = (int32_t)seqOffset * 100 - sbs * (int32_t)params.XscoreErrorCost;
+
+
+				if (ws.scoreEnd < result.minScore)
+				{
+					result.minScore = ws.scoreEnd;
+					result.minScoreNodeOffset = pos;
+				}
+
+					Word validMask = maxXScoreCandidateMask(ws.VP, newHN);
+	                updateRunningMax32bit(tempScores, accumulatedVectorMax, v_errorCost_32, zeroScoreN, v_cells0, v_cells1, v_cells2, v_cells3, validMask);
+
+				if constexpr (!AllowEarlyLeave) callback(ws);
+				charChunk >>= 2;
+				HP >>= 1;
+				HN >>= 1;
+				forceMask >>= 1;
+				pos++;
+				slice.HP[bigChunk] |= hinP << (offset + bigChunkOffset);
+				slice.HN[bigChunk] |= hinN << (offset + bigChunkOffset);
+			}
+			offset = 0;
+		}
+
+		int32_t finalVectorMax = reduceRunningMax32bit(accumulatedVectorMax);
+		result.maxExactEndposScore = std::max(result.maxExactEndposScore, (ScoreType)finalVectorMax);
+#else
 		for (; smallChunk < params.graph.CHUNKS_IN_NODE; smallChunk++)
 		{
 			size_t bigChunk = smallChunk / 2;
@@ -1602,6 +1865,8 @@ public:
 			}
 			offset = 0;
 		}
+#endif
+
 		result.cellsProcessed = pos;
 		slice.endSlice = ws;
 #ifndef NDEBUG
